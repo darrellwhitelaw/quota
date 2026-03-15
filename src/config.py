@@ -26,8 +26,10 @@ class Settings(BaseSettings):
     # Email delivery (Gmail REST API via OAuth2)
     gmail_from_email: str = ""
     gmail_from_name: str = ""
-    gmail_app_password: str = ""
-    gmail_refresh_token: str = ""
+    google_client_id: str = ""       # OAuth2 client ID from Google Cloud Console
+    google_client_secret: str = ""   # OAuth2 client secret from Google Cloud Console
+    gmail_refresh_token: str = ""    # Generated via oauth_setup.py
+    gmail_app_password: str = ""     # Gmail App Password — for IMAP inbox monitoring only
     email_daily_send_limit: int = 10
 
     # Slack (approval flow)
