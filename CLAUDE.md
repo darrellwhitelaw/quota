@@ -1,309 +1,401 @@
-# Quota — Claude Code Setup Guide
+# Quota — Claude Code Assistant
 
-You are helping someone set up and run the Quota autonomous sales agent framework. This file tells you exactly how to do that.
-
-When someone opens this repo for the first time, **start by running the setup check below** to understand where they are. Then guide them through what's missing — one step at a time, in order.
+You are the setup guide, debugger, and co-pilot for this Quota installation. Your job is to get the user from zero to a running autonomous sales agent system as fast as possible.
 
 ---
 
-## First thing to do
+## How long does setup take?
 
-Run this triage to understand their current state:
+Be honest with the user upfront:
+
+| Stage | Time |
+|-------|------|
+| Account creation (Anthropic, Google Cloud, Attio, Slack, Apollo) | 30–60 min |
+| Anthropic API key + PostgreSQL | 5 min |
+| Gmail OAuth2 setup (the most involved step) | 20–30 min |
+| Attio custom fields + lists | 15–20 min |
+| Slack app + permissions | 10–15 min |
+| Prompt customization (shared.md + agent prompts) | 30–60 min |
+| First run + smoke test | 10 min |
+| **Total** | **2–3 hours** |
+
+The 2-hour end is realistic if all accounts exist. The 3-hour end applies if creating accounts from scratch or if something needs debugging. Gmail OAuth is where most people spend the extra time.
+
+If they already have Anthropic + a Postgres DB, they can be running agents in under an hour.
+
+---
+
+**When this repo is opened for the first time, do this immediately — don't wait to be asked:**
 
 ```bash
-# Check .env exists and what's filled in
-cat .env 2>/dev/null || echo "NO .ENV FILE"
+cat .env 2>/dev/null || echo "NO .ENV FILE — run: cp .env.example .env"
 ```
 
-Then check:
-- Is there a `.env` file? If not, create one from `.env.example` before anything else.
-- Which variables are empty? That tells you exactly what to set up next.
-- Is there a running database? (`DATABASE_URL` set and reachable)
-
-Ask the user: **"What have you already set up? Let me check your .env and tell you what's missing."**
+Read the output. Tell the user exactly which variables are empty and what they need to do next. Then ask: *"Where are you in the setup? I'll pick up from there."*
 
 ---
 
-## Setup order (follow this sequence — later steps depend on earlier ones)
+## Your setup checklist
 
-### Step 1 — Anthropic API key
-**Blocks everything.** No agents run without this.
+Work through these in order. Each step unlocks the next.
 
-- Get it from: https://console.anthropic.com → API Keys
-- Set `ANTHROPIC_API_KEY` in `.env`
-- Verify: `python3 -c "import anthropic; c = anthropic.Anthropic(api_key='KEY'); print('ok')"` (replace KEY)
+---
 
-### Step 2 — PostgreSQL database
-**Blocks the dashboard and all agents.**
+### ✦ Step 1 — Anthropic API key
+**Nothing works without this.**
 
-**Local (fastest for testing):**
+```bash
+# Check if it's set
+grep ANTHROPIC_API_KEY .env
+```
+
+If empty: https://console.anthropic.com → API Keys → create key → paste into `.env`.
+
+Verify it works:
+```bash
+python3 -c "
+import os; from dotenv import load_dotenv; load_dotenv()
+import anthropic
+r = anthropic.Anthropic().messages.create(model='claude-haiku-4-5-20251001', max_tokens=10, messages=[{'role':'user','content':'hi'}])
+print('✓ Anthropic connected')
+"
+```
+
+---
+
+### ✦ Step 2 — PostgreSQL
+**Blocks the dashboard and all agents from starting.**
+
+```bash
+grep DATABASE_URL .env
+```
+
+**Local (fastest — use for dev):**
 ```bash
 docker run -d --name quota-db \
-  -e POSTGRES_DB=quota \
-  -e POSTGRES_USER=quota \
-  -e POSTGRES_PASSWORD=quota \
+  -e POSTGRES_DB=quota -e POSTGRES_USER=quota -e POSTGRES_PASSWORD=quota \
   -p 5432:5432 postgres:16
+
+# Then set:
+# DATABASE_URL=postgresql+asyncpg://quota:quota@localhost:5432/quota
 ```
-Set `DATABASE_URL=postgresql+asyncpg://quota:quota@localhost:5432/quota`
 
-**Railway (for production):**
-- Railway project → New → Database → Add PostgreSQL
-- Copy the DATABASE_URL Railway provides
-- **Critical:** change `postgresql://` → `postgresql+asyncpg://` in the URL before saving
+**Railway (production):** Add PostgreSQL plugin → copy the URL → **change `postgresql://` to `postgresql+asyncpg://`**. This scheme change is required — the app uses asyncpg and will fail to connect without it.
 
-Verify the server starts: `uvicorn src.main:app --reload` — look for "Database ready" in the logs.
-
-### Step 3 — Attio CRM
-**Blocks all agents from reading or writing pipeline data.**
-
-1. Get API key: Attio → Settings → API Keys → create key → set `ATTIO_API_KEY`
-2. **Create custom fields** — this is the most commonly missed step. Agents will fail silently without these.
-
-Run this check to see if the user's Attio has the right fields:
+Verify:
 ```bash
-curl -s "https://api.attio.com/v2/objects/companies/attributes" \
-  -H "Authorization: Bearer $ATTIO_API_KEY" | python3 -m json.tool | grep '"slug"' | head -20
+python3 -c "
+import asyncio, os; from dotenv import load_dotenv; load_dotenv()
+from sqlalchemy.ext.asyncio import create_async_engine
+async def check():
+    e = create_async_engine(os.getenv('DATABASE_URL'))
+    async with e.connect() as c: await c.execute(__import__('sqlalchemy').text('SELECT 1'))
+    print('✓ Database connected')
+asyncio.run(check())
+"
 ```
 
-Required field slugs on **Companies**:
-- `outreach_status` (Select) — pipeline stage
-- `account_tier` (Number) — 1, 2, or 3
-- `current_touch` (Number)
-- `last_touch_date` (Date)
-- `next_touch_date` (Date)
-- `channel_partner` (Select)
+---
 
-Required field slugs on **People**:
-- `sequence_status` (Select)
-- `sequence_touch` (Number)
-- `sequence_function` (Select)
-- `last_touch_date` (Date)
-- `next_touch_date` (Date)
+### ✦ Step 3 — Attio CRM
+**Agents will run but can't read or write pipeline data without this.**
 
-If fields are missing: Attio → Settings → Objects → [Companies or People] → Attributes → Add attribute. The slug must match exactly.
+```bash
+grep ATTIO_API_KEY .env
+```
 
-3. Create three Attio Lists: `Tier 1`, `Tier 2`, `Tier 3`. Scout reads these to find target accounts.
+Get the key: Attio → Settings → API Keys → create.
 
-### Step 4 — Gmail (two separate auth mechanisms)
+**Then create the custom fields.** This is the most commonly skipped step. Run this to see what's in your Attio workspace:
 
-**Part A: OAuth2 for sending emails and creating drafts**
+```bash
+source .env && curl -s "https://api.attio.com/v2/objects/companies/attributes" \
+  -H "Authorization: Bearer $ATTIO_API_KEY" \
+  | python3 -c "import sys,json; [print(a['api_slug']) for a in json.load(sys.stdin).get('data',[])]"
+```
 
-This requires a Google Cloud project. Walk the user through:
+Cross-reference against the required slugs. If any are missing, create them in Attio → Settings → Objects → [Companies or People] → Attributes:
 
-1. Go to https://console.cloud.google.com → create or select a project
-2. APIs & Services → Library → "Gmail API" → Enable
-3. APIs & Services → Credentials → Create Credentials → OAuth client ID
-   - Application type: **Desktop app**
-   - Download the JSON → save as `credentials.json` in the project root
-4. Run setup:
+**Companies object:**
+| Slug | Type |
+|------|------|
+| `outreach_status` | Select |
+| `account_tier` | Number |
+| `current_touch` | Number |
+| `last_touch_date` | Date |
+| `next_touch_date` | Date |
+| `channel_partner` | Select |
+
+**People object:**
+| Slug | Type |
+|------|------|
+| `sequence_status` | Select |
+| `sequence_touch` | Number |
+| `sequence_function` | Select |
+| `last_touch_date` | Date |
+| `next_touch_date` | Date |
+
+Also create three Attio Lists named exactly: `Tier 1`, `Tier 2`, `Tier 3`. Scout reads these to know which accounts to work.
+
+---
+
+### ✦ Step 4 — Gmail
+**Two separate auth mechanisms. Both matter.**
+
+```bash
+grep -E "GOOGLE_CLIENT|GMAIL_REFRESH|GMAIL_APP_PASSWORD|GMAIL_FROM" .env
+```
+
+**Part A — OAuth2 (sending emails and creating drafts):**
+
+1. https://console.cloud.google.com → create/select project
+2. APIs & Services → Library → Gmail API → Enable
+3. APIs & Services → Credentials → Create Credentials → **OAuth client ID → Desktop app**
+4. Download credentials JSON → save as `credentials.json` in this directory
+5. Run:
    ```bash
    pip install google-auth-oauthlib google-auth-httplib2 google-api-python-client
    python oauth_setup.py
    ```
-   A browser opens — have the user authorize with the Gmail account they want to send from.
-5. Extract the values:
+   A browser opens — authorize with the outreach Gmail account.
+6. Extract the env vars:
    ```bash
    python3 -c "
    import json
-   creds = json.load(open('credentials.json'))['installed']
-   token = json.load(open('gmail_token.json'))
-   print('GOOGLE_CLIENT_ID=' + creds['client_id'])
-   print('GOOGLE_CLIENT_SECRET=' + creds['client_secret'])
-   print('GMAIL_REFRESH_TOKEN=' + token['refresh_token'])
+   c = json.load(open('credentials.json'))['installed']
+   t = json.load(open('gmail_token.json'))
+   print('GOOGLE_CLIENT_ID=' + c['client_id'])
+   print('GOOGLE_CLIENT_SECRET=' + c['client_secret'])
+   print('GMAIL_REFRESH_TOKEN=' + t['refresh_token'])
    "
    ```
-6. Set those three values + `GMAIL_FROM_EMAIL` and `GMAIL_FROM_NAME` in `.env`
+   Copy those three values into `.env`. Also set `GMAIL_FROM_EMAIL` and `GMAIL_FROM_NAME`.
 
-**Part B: App Password for IMAP inbox monitoring**
+**Part B — App Password (IMAP inbox monitoring):**
 
-This is separate from OAuth2. Without it, the Inbox agent won't run.
+This is different from OAuth2. Without it, the Inbox agent won't run.
 
-1. Google Account → Security → 2-Step Verification must be ON
-2. Search "App passwords" → create one (name it "Quota IMAP") → copy the 16-char password
-3. Set `GMAIL_APP_PASSWORD` in `.env`
+1. Google Account → Security → enable 2-Step Verification if not already on
+2. Search "App passwords" → create one → name it "Quota IMAP" → copy the 16-char password
+3. Set as `GMAIL_APP_PASSWORD` in `.env`
 
-Common error: "Application-specific password required" — this means 2-step verification isn't enabled.
+> If the user hits "Application-specific password required" — 2-step verification isn't enabled.
 
-### Step 5 — Slack (three config steps, all needed for full functionality)
+> Don't commit `credentials.json` or `gmail_token.json` — they're in `.gitignore` but worth confirming.
 
-**Step 5a — Create the app and get the bot token:**
-1. https://api.slack.com/apps → Create New App → From scratch
-2. OAuth & Permissions → Bot Token Scopes → add: `chat:write`, `chat:write.public`, `channels:read`, `im:write`, `im:history`
-3. Install to workspace → copy Bot User OAuth Token (`xoxb-...`) → set as `SLACK_BOT_TOKEN`
-4. Basic Information → Signing Secret → set as `SLACK_SIGNING_SECRET`
-5. Right-click the approval channel in Slack → Copy link → last segment is the channel ID → set as `SLACK_APPROVAL_CHANNEL`
+---
 
-**Step 5b — Events API (needed for @CRO bot):**
-Must be done after deploying (needs a public URL):
-- Event Subscriptions → Enable → Request URL: `https://YOUR-DOMAIN/webhooks/slack/events`
-- Subscribe to bot events: `app_mention`, `message.im`
-
-**Step 5c — Interactive Components (needed for approval card buttons):**
-Must be done after deploying:
-- Interactivity & Shortcuts → Enable → Request URL: `https://YOUR-DOMAIN/webhooks/slack`
-
-Note: Steps 5b and 5c require a deployed server with a public URL. They can be skipped for local testing — agents will still run, they just won't post to Slack.
-
-### Step 6 — Optional: Apollo and FullEnrich
-
-- Apollo: https://app.apollo.io → Settings → API → create key → `APOLLO_API_KEY`
-  Without this, Scout won't source new contacts (existing Attio contacts still get sequenced).
-- FullEnrich: https://fullenrich.com → Settings → `FULLENRICH_API_KEY`
-  Without this, Scout uses Apollo's native email field (lower coverage, more bounces).
-
-### Step 7 — Dashboard credentials
+### ✦ Step 5 — Slack
+**Three separate configuration steps. All needed for the full approval flow.**
 
 ```bash
-# Generate a secure JWT secret:
+grep -E "SLACK" .env
+```
+
+**5a — Create the app:**
+1. https://api.slack.com/apps → Create New App → From scratch
+2. OAuth & Permissions → Bot Token Scopes → add: `chat:write`, `chat:write.public`, `channels:read`, `im:write`, `im:history`
+3. Install App → copy **Bot User OAuth Token** (`xoxb-...`) → `SLACK_BOT_TOKEN`
+4. Basic Information → Signing Secret → `SLACK_SIGNING_SECRET`
+5. Right-click the channel in Slack → Copy link → last URL segment = channel ID → `SLACK_APPROVAL_CHANNEL`
+
+**5b — Events API** (for the @CRO conversational bot — do after deploy):
+- Event Subscriptions → Enable
+- Request URL: `https://YOUR-DEPLOYED-URL/webhooks/slack/events`
+- Subscribe to bot events: `app_mention`, `message.im`
+
+**5c — Interactive Components** (for approval card buttons — do after deploy):
+- Interactivity & Shortcuts → Enable
+- Request URL: `https://YOUR-DEPLOYED-URL/webhooks/slack`
+
+> Slack is optional for local development. Skip 5b/5c until you have a deployed URL.
+
+---
+
+### ✦ Step 6 — Optional integrations
+
+```bash
+grep -E "APOLLO|FULLENRICH" .env
+```
+
+- **Apollo** (`APOLLO_API_KEY`): https://app.apollo.io → Settings → API. Without this, Scout can't source new contacts — it will only work accounts already in Attio.
+- **FullEnrich** (`FULLENRICH_API_KEY`): https://fullenrich.com → Settings. Without this, Scout uses Apollo's native email field — lower coverage and higher bounce rate.
+
+---
+
+### ✦ Step 7 — Security
+
+```bash
+grep -E "JWT_SECRET|DASHBOARD_PASSWORD" .env
+```
+
+Generate a real JWT secret:
+```bash
 python3 -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-Set `JWT_SECRET` (the above output) and `DASHBOARD_PASSWORD` (choose anything) in `.env`.
+Set that as `JWT_SECRET`. Set `DASHBOARD_PASSWORD` to anything memorable. Don't use the defaults in production.
 
-### Step 8 — Customize agent prompts (most important step)
+---
 
-**Do this before running agents** — agents are useless until the prompts describe the user's business.
+### ✦ Step 8 — Customize agent prompts
+**This is the most important step. Agents are useless until the prompts describe the user's actual business.**
 
-Read the current state of the prompts:
 ```bash
 cat prompts/shared.md
 ```
 
-The `shared.md` file is prepended to every agent. It should describe:
-- Company name and what they sell
-- Who they sell to (ICP)
-- Rep name, email, calendar link
-- Tone and rules
+`shared.md` is prepended to every agent's context. It should describe the company, product, ICP, rep name, calendar link, and rules that apply everywhere.
 
-**Offer to help write it interactively.** Ask:
-> "Tell me about your company — what do you sell, who buys it, and what's your ICP? I'll write your shared.md and all the agent prompts."
+**Offer to write the prompts.** Ask the user:
+> *"Tell me about your business — what do you sell, who buys it, and what does your ICP look like? I'll write your shared.md and agent prompts from scratch."*
 
-Once you have that information, read each prompt file and fill it in properly. The key files to customize first:
-1. `prompts/shared.md` — company context, rules, rep info (affects all agents)
-2. `prompts/outreach.md` — email sequence angles, CTAs, tone
-3. `prompts/scout.md` — ICP criteria, what to look for in target accounts
-4. `prompts/cro.md` — orchestration priorities, what to focus on daily
+Once you have their context, read each template in `prompts/` and rewrite it with their specifics. The `[YOUR X]` placeholders show exactly what needs replacing. Each file also contains a Claude prompt generator — a ready-to-copy prompt the user can run in claude.ai to generate a complete version.
 
-### Step 9 — Email signature
+Priority order for customization:
+1. `prompts/shared.md` — affects every agent
+2. `prompts/outreach.md` — email sequence, tone, CTAs
+3. `prompts/scout.md` — ICP criteria, what to look for
+4. `prompts/cro.md` — daily orchestration priorities
+
+---
+
+### ✦ Step 9 — Email signature
 
 ```bash
 grep -n "_SIGNATURE_HTML" src/tools/email_tools.py
 ```
 
-Find `_SIGNATURE_HTML` and help the user update it with their real name, title, company, phone, and calendar link. This appears at the bottom of every outreach email.
+Open `src/tools/email_tools.py` and find `_SIGNATURE_HTML`. Replace the placeholder with the user's real name, title, company, phone number, and calendar link. This appears at the bottom of every email.
 
-### Step 10 — Start the server and test
+---
+
+### ✦ Step 10 — First run
 
 ```bash
 uvicorn src.main:app --reload
 ```
 
-Watch the startup logs for:
-- `✓ Database ready` — DB connected
-- `✓ Gmail API email client initialized` — sending works
+Read the startup logs together. What to look for:
+- `✓ Database ready` — DB connected and tables created
+- `✓ Gmail API email client initialized (you@domain.com)` — sending works
 - `✓ Gmail IMAP inbox client initialized` — inbox monitoring works
 - `✓ Attio client initialized` — CRM connected
-- `✓ Slack client initialized` — notifications work
-- Any `WARNING: ... not set` lines tell you what's disabled
+- `✓ Slack client initialized` — notifications enabled
+- `WARNING: Gmail credentials not set` — check Steps 4 and 7
+- `WARNING: Attio not configured` — check Step 3
 
-**Test a safe first run** (read-only, won't send anything):
+**First test — safe and read-only:**
 ```bash
-# Get a token
+# Get a JWT
 TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
   -H "Content-Type: application/json" \
   -d "{\"password\":\"$(grep DASHBOARD_PASSWORD .env | cut -d= -f2)\"}" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token','ERROR'))")
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token', d))")
 
-echo "Token: $TOKEN"
-
-# Run inbox agent (read-only — just checks Gmail, classifies, updates Attio)
-curl -X POST http://localhost:8000/agents/inbox/heartbeat \
-  -H "Authorization: Bearer $TOKEN"
+# Run the inbox agent (reads Gmail, classifies, updates Attio — doesn't send anything)
+curl -s -X POST http://localhost:8000/agents/inbox/heartbeat \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
 ```
 
-Open http://localhost:8000 — sign in — check the Runs page to see what happened.
+Open http://localhost:8000 → sign in → Runs page → click the row → read the summary and tools used.
 
 ---
 
-## Common errors and fixes
+## Deploy to Railway
 
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `asyncpg: password authentication failed` | Wrong DATABASE_URL | Check the URL scheme is `postgresql+asyncpg://` and credentials match |
-| `Gmail API: invalid_grant` | Expired or wrong refresh token | Re-run `python oauth_setup.py` |
-| `AttioClient: 404 on attribute` | Missing custom field in Attio | Create the field in Attio → Settings → Objects → Attributes |
-| `Slack: not_in_channel` | Bot not added to the approval channel | In Slack, type `/invite @YourBotName` in the channel |
-| `Slack signature verification failed` | Wrong signing secret | Re-copy from Slack App → Basic Information → Signing Secret |
-| Server starts but no agents listed in dashboard | DB not seeded | Check `prompts/` files exist — they seed on first startup |
-| `Module not found` errors | Dependencies not installed | Run `pip install -e ".[dev]"` |
-| Agent runs 0 times, no errors | Agent disabled | Dashboard → Agents → check the enabled toggle |
-
----
-
-## Deploying to Railway
-
-1. Push the repo to GitHub
-2. Railway → New Project → Deploy from GitHub repo → select the repo
-3. Add PostgreSQL: Railway project → New → Database → Add PostgreSQL
-4. Set all env vars from `.env` in Railway → Variables
-5. **Fix the DATABASE_URL scheme:** Railway gives `postgresql://` — change to `postgresql+asyncpg://`
-6. Deploy — Railway auto-detects the Dockerfile
-
-After deploy:
-- Go back to Slack app config → add the Railway URL to Events API and Interactive Components
-- Check Railway logs for any startup errors
-
----
-
-## How to extend the system
-
-**Add a new agent:**
 ```bash
-# Show the pattern
-cat src/agents/followup.py
+# Push repo to GitHub first, then:
 ```
-1. Create `src/agents/your_agent.py` — copy the pattern from `followup.py`
-2. Add `prompts/your_agent.md`
-3. Register in `src/routers/heartbeats.py` (copy an existing heartbeat endpoint)
-4. Add to `_AGENT_DEFAULTS` in `src/main.py`
-5. Optionally add to `_VALID_AGENTS` in `src/tools/dispatch_tools.py` so CRO can dispatch it
 
-**Swap the CRM:**
-All CRM logic is in `src/tools/attio_tools.py`. The tool names used in prompts (`attio_query_companies`, `attio_update_company`, etc.) are what agents see — if you rename them, update the prompts too.
+1. railway.app → New Project → Deploy from GitHub → select repo
+2. New → Database → Add PostgreSQL
+3. Copy DATABASE_URL from Railway Variables → **change `postgresql://` to `postgresql+asyncpg://`** → save it back
+4. Add all `.env` values to Railway Variables
+5. Deploy — Railway finds the Dockerfile automatically
 
-**Change a model:**
-Dashboard → Agents → click the agent → Model dropdown → save. Takes effect at next run. No redeploy needed.
+After deploy, update the Slack app:
+- Events API Request URL → `https://YOUR-RAILWAY-URL/webhooks/slack/events`
+- Interactive Components URL → `https://YOUR-RAILWAY-URL/webhooks/slack`
+
+Check Railway logs. The same startup messages apply.
 
 ---
 
-## Prompt seeding behavior (important)
+## Troubleshoot anything
 
-Prompts in `prompts/` are read **once** per agent on first startup. After that, the database record is the source of truth.
+When the user hits an error, read the relevant file first, then diagnose:
 
-This means:
-- Editing a `.md` file after first run has **no effect** — edit via the dashboard instead
-- To force a re-seed: delete the agent record from the DB and restart the server
-- The dashboard prompt editor writes to the DB directly — use that for ongoing edits
+```bash
+# Check recent logs from a running server (if in Railway, pull from their dashboard)
+# Check the Runs page in the dashboard for agent errors
+# Check startup logs for initialization failures
+```
+
+Common issues:
+
+| Symptom | Most likely cause | Fix |
+|---------|------------------|-----|
+| `asyncpg: password authentication failed` | Wrong scheme in DATABASE_URL | Change `postgresql://` → `postgresql+asyncpg://` |
+| `Gmail: invalid_grant` | Expired refresh token | Re-run `python oauth_setup.py` |
+| Agent runs but writes nothing to Attio | Missing custom fields | Run the Attio field check in Step 3 |
+| `Slack: channel_not_found` | Wrong channel ID format | Must be the `C0XXXXXXX` ID, not the channel name |
+| `Slack: not_in_channel` | Bot not added to channel | In Slack: `/invite @YourBotName` in the target channel |
+| `Slack signature verification failed` | Wrong signing secret | Re-copy from Slack App → Basic Information |
+| Dashboard loads but agents page is empty | DB not seeded | Check `prompts/` files exist; they seed on first startup |
+| Prompts changed in file but agent behavior unchanged | DB seeded already | Edit via Dashboard → Agents instead |
+| Agent runs for 15+ minutes | Runaway tool loop in prompt | Add explicit stopping conditions to the prompt; check Runs page for turn count |
 
 ---
 
-## Quick reference: what each env var does
+## Extend the system
+
+**Add an agent** — follow the pattern in `src/agents/followup.py`:
+```bash
+cat src/agents/followup.py  # read this first
+```
+Then: create `src/agents/your_agent.py`, add `prompts/your_agent.md`, register a heartbeat in `src/routers/heartbeats.py`, add to `_AGENT_DEFAULTS` in `src/main.py`.
+
+**Swap the CRM** — all CRM logic lives in `src/tools/attio_tools.py`. Replace it with HubSpot, Salesforce, or anything else. The tool names (e.g. `attio_query_companies`) are what agents see — if you rename them, update the prompts too.
+
+**Change a model** — Dashboard → Agents → click agent → Model dropdown. Takes effect at next run. No redeploy needed.
+
+---
+
+## How prompts work (read this before editing)
 
 ```
-ANTHROPIC_API_KEY      → Claude API — all agent reasoning
-DATABASE_URL           → PostgreSQL — must use postgresql+asyncpg:// scheme
-ATTIO_API_KEY          → Attio CRM read/write
-GMAIL_FROM_EMAIL       → Sender address for all outreach
-GMAIL_FROM_NAME        → Sender display name
-GOOGLE_CLIENT_ID       → OAuth2 client from Google Cloud Console
-GOOGLE_CLIENT_SECRET   → OAuth2 secret from Google Cloud Console
-GMAIL_REFRESH_TOKEN    → From oauth_setup.py — for sending + drafts
-GMAIL_APP_PASSWORD     → 16-char App Password — for IMAP inbox only
-SLACK_BOT_TOKEN        → xoxb-... for posting messages
-SLACK_SIGNING_SECRET   → For verifying Slack webhook authenticity
-SLACK_APPROVAL_CHANNEL → Channel ID for approvals and notifications
-DASHBOARD_PASSWORD     → Login password for the web UI
-JWT_SECRET             → run: python3 -c "import secrets; print(secrets.token_hex(32))"
-APOLLO_API_KEY         → Optional: contact sourcing via Apollo
-FULLENRICH_API_KEY     → Optional: email verification waterfall
+prompts/shared.md
+      +
+prompts/[agent].md
+      =
+Full system prompt sent to Claude at each heartbeat
+```
+
+Prompts are seeded into the database **once** — on first startup per agent. After that:
+- Editing the `.md` file has **no effect**
+- Use **Dashboard → Agents → prompt editor** for all ongoing edits
+- To force a re-seed: clear the agent's DB record and restart
+
+---
+
+## Env var quick reference
+
+```
+ANTHROPIC_API_KEY      Claude API — all reasoning
+DATABASE_URL           PostgreSQL — must use postgresql+asyncpg:// scheme
+ATTIO_API_KEY          Attio CRM
+GMAIL_FROM_EMAIL       Sender address
+GMAIL_FROM_NAME        Display name in From: field
+GOOGLE_CLIENT_ID       From credentials.json → installed → client_id
+GOOGLE_CLIENT_SECRET   From credentials.json → installed → client_secret
+GMAIL_REFRESH_TOKEN    From gmail_token.json → refresh_token
+GMAIL_APP_PASSWORD     16-char App Password for IMAP inbox only
+SLACK_BOT_TOKEN        xoxb-... from Slack app OAuth page
+SLACK_SIGNING_SECRET   From Slack app Basic Information page
+SLACK_APPROVAL_CHANNEL Channel ID (C0XXXXXXX format)
+DASHBOARD_PASSWORD     Web UI login
+JWT_SECRET             python3 -c "import secrets; print(secrets.token_hex(32))"
+APOLLO_API_KEY         Optional — contact sourcing
+FULLENRICH_API_KEY     Optional — email verification
 ```
