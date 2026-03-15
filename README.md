@@ -320,7 +320,8 @@ Running 100 target accounts through a full sequence (monthly):
 | Apollo.io (contact sourcing) | $49+/month (or credits) |
 | FullEnrich | $20–50/month depending on volume |
 | Railway (app + Postgres) | $5–10/month |
-| Gmail / Slack / Attio | Per your existing plans |
+| Attio (CRM) | Free tier available; paid plans from $34/user/month |
+| Gmail / Slack | Per your existing plans |
 
 Token spend is visible per-run in the dashboard. Set `email_daily_send_limit` and `*_batch_size` in `.env` to control pace and cost.
 
